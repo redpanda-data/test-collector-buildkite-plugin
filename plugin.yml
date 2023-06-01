@@ -37,7 +37,7 @@ configuration:
       type: integer
     annotation-link:
       type: boolean
-    concurrent-uploads:
+    upload-concurrency:
       type: integer
   required:
     - files
