@@ -170,10 +170,10 @@ find_and_upload() {
         sleep 1
       done
 
-      #((uploads_in_progress++))
+      uploads_in_progress=$((uploads_in_progress + 1))
 
       echo "DEBUG"
-
+      
       echo "Uploading '$file'..."
       if ! upload "$TOKEN_VALUE" "$FORMAT" "${file}"; then
         echo "Error uploading, will continue"
@@ -182,7 +182,7 @@ find_and_upload() {
         save-report-url "${CURL_RESP_FILE}"
       fi
       
-      #((uploads_in_progress--))
+      uploads_in_progress=$((uploads_in_progress - 1))
     done
 
     # Wait for all uploads to finish
