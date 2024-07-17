@@ -37,6 +37,10 @@ configuration:
       type: boolean
     upload-concurrency:
       type: integer
+    override-buildkite-commit:
+      type: string
+    override-buildkite-branch:
+      type: string
   required:
     - files
     - format
