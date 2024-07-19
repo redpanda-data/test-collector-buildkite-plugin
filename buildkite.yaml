@@ -6,9 +6,9 @@ steps:
 
   - label: ":sparkles:"
     plugins:
-      - plugin-linter#v3.2.0:
+      - plugin-linter#v3.3.0:
           id: test-collector
 
   - label: ":docker: :hammer:"
     plugins:
-      - plugin-tester#v1.1.0: ~
+      - plugin-tester#v1.1.1: ~

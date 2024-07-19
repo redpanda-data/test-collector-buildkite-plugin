@@ -1,4 +1,4 @@
-# Test Collector Buildkite Plugin [![Build status](https://badge.buildkite.com/e77fce33cffd9045543fdba23c51a6aec8e8b6161fa4c136a3.svg)](https://buildkite.com/buildkite/plugins-test-collector)
+# Test Collector Buildkite Plugin [![Build status](https://badge.buildkite.com/e77fce33cffd9045543fdba23c51a6aec8e8b6161fa4c136a3.svg?branch=main)](https://buildkite.com/buildkite/plugins-test-collector)
 
 A Buildkite plugin for uploading [JSON](https://buildkite.com/docs/test-analytics/importing-json) or [JUnit](https://buildkite.com/docs/test-analytics/importing-junit-xml) files to [Buildkite Test Analytics](https://buildkite.com/test-analytics) ✨
 
@@ -90,6 +90,20 @@ Adds an annotation to the build run with a link to the uploaded report.
 
 Default value: `false`
 
+#### `upload-concurrency`(number)
+
+The number of concurrent file uploads to perform to the Buildkite analytics API.
+
+Default value: `1`
+
+## Requirements
+
+This plugin requires `jq` for parsing JSON data. If `jq` is not found on the agent, `sed` will be used as a fallback. Ensure that `sed` is also available to handle scenarios where `jq` cannot be used.
+
+## Fallback Behavior
+
+If `jq` is unavailable, the plugin will attempt to parse the results using `sed`. This ensures that the plugin remains functional even if the preferred JSON parser is missing.
+
 ## Examples
 
 ### Upload a JUnit file
@@ -101,7 +115,7 @@ steps:
   - label: "🔨 Test"
     command: "make test"
     plugins:
-      - test-collector#v1.8.0:
+      - test-collector#v1.10.1:
           files: "test/junit-*.xml"
           format: "junit"
 ```
@@ -115,7 +129,7 @@ steps:
   - label: "🔨 Test"
     command: "make test"
     plugins:
-      - test-collector#v1.8.0:
+      - test-collector#v1.10.1:
           files:
             - "test-data-*.json"
           format: "json"
@@ -135,9 +149,9 @@ steps:
   - wait
 
   - label: "🔍 Test Analytics"
-    command: buildkite-agent artifact download tests-*.xml
+    command: buildkite-agent artifact download "tests-*.xml" .
     plugins:
-      - test-collector#v1.8.0:
+      - test-collector#v1.10.1:
           files: "tests-*.xml"
           format: "junit"
 ```
@@ -151,7 +165,7 @@ steps:
   - label: "🔨 Test"
     command: "make test"
     plugins:
-      - test-collector#v1.8.0:
+      - test-collector#v1.10.1:
           files: "test-data-*.json"
           format: "json"
           branches: "-qa$"
@@ -164,7 +178,7 @@ steps:
   - label: "🔨 Test"
     command: "make test"
     plugins:
-      - test-collector#v1.8.0:
+      - test-collector#v1.10.1:
           files: "test-data-*.json"
           format: "json"
           exclude-branches: "^legacy$"
@@ -177,7 +191,7 @@ steps:
   - label: "🔨 Test"
     command: "make test"
     plugins:
-      - test-collector#v1.8.0:
+      - test-collector#v1.10.1:
           files: "test-data-*.json"
           format: "json"
           branches: "^stage-"

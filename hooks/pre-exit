@@ -6,8 +6,9 @@ FORMAT="${BUILDKITE_PLUGIN_TEST_COLLECTOR_FORMAT:-}"
 TIMEOUT="${BUILDKITE_PLUGIN_TEST_COLLECTOR_TIMEOUT:-30}"
 BASE_PATH="${BUILDKITE_PLUGIN_TEST_COLLECTOR_BASE_PATH:-.}"
 ANNOTATE="${BUILDKITE_PLUGIN_TEST_COLLECTOR_ANNOTATION_LINK:-false}"
+UPLOAD_CONCURRENCY="${BUILDKITE_PLUGIN_TEST_COLLECTOR_UPLOAD_CONCURRENCY:-1}"
 REPORT_URLS_FILE=$(mktemp)
-CURL_RESP_FILE="${CURL_RESP_FILE:-response.json}"
+CURL_RESP_FILE="${CURL_RESP_FILE:-}"
 DEBUG="false"
 MESSAGE="${BUILDKITE_PLUGIN_TEST_COLLECTOR_MESSAGE:-$BUILDKITE_MESSAGE}"
 
@@ -58,7 +59,7 @@ annotation-link() {
       REPORT_COUNT=$((REPORT_COUNT + 1))
     done
 
-    buildkite-agent annotate --style info --context "test-collector" "Check the test report(s) here: \n\n${REPORTS}"
+    echo -e "Check the ${BUILDKITE_LABEL} test report(s) here: \n\n${REPORTS}" | buildkite-agent annotate --style info --context "test-collector" --append
   else
     echo "There are no report URLs to annotate."
   fi
@@ -73,28 +74,42 @@ save-report-url() {
     echo "Could not get the tests report URL from $json_file. File not found."
     return
   fi
-  # Could be easier with jq, but we don't want to require it
+
   if which jq >/dev/null; then
-      echo "Using jq to parse the report URL"
-      report_url=$(jq -r '.run_url' "${json_file}")
+    echo "Using jq to parse the report URL"
+    report_url=$(jq -r '.run_url' "${json_file}" 2>&1) # Capture stderr for error reporting
+    if [[ "$report_url" == "null" || "$report_url" == "" || "$report_url" =~ "parse error" ]]; then
+      echo "jq parsing failed with the message: $report_url"
+      echo "Contents of $json_file:"
+      cat "$json_file"
+      return
+    fi
   else
-      echo "Not using jq to parse the report URL"
-      report_url=$(sed 's/.*"run_url" *: *"\([^"]*\)".*/\1/g' "${json_file}")
+    echo "jq not installed, attempting to parse with sed"
+    report_url=$(sed 's/.*"run_url" *: *"\([^"]*\)".*/\1/g' "${json_file}")
+    if [[ "$report_url" == "null" || "$report_url" == "" ]]; then
+      echo "sed parsing failed, no valid URL extracted."
+      echo "Contents of $json_file:"
+      cat "$json_file"
+      return
+    fi
   fi
 
-  if [ "$report_url" == "null" ]; then
-    echo "Could not get the tests report URL from $json_file. 'run_url' property not found."
+  if [ -z "$report_url" ]; then
+    echo "No report URL found or extracted. Unable to save."
     return
   fi
 
   echo "$report_url" >> "$REPORT_URLS_FILE"
 }
 
+
 # Uploads files to the Test Analytics API
 #
 # Upload failures should not fail the build, and should have a sensible timeout,
 # so that Test Analytics availability doesn't affect build reliability.
 upload() {
+  local response_file="$4"
   local file="$3"
   local format="$2"
 
@@ -106,26 +121,26 @@ upload() {
     "--form" "format=${format}"
     "--form" "data=@\"$file\""
     "--form" "run_env[CI]=buildkite"
-    "--form" "run_env[key]=$BUILDKITE_BUILD_ID"
-    "--form" "run_env[url]=$BUILDKITE_BUILD_URL"
-    "--form" "run_env[branch]=$BUILDKITE_BRANCH"
-    "--form" "run_env[commit_sha]=$BUILDKITE_COMMIT"
-    "--form" "run_env[number]=$BUILDKITE_BUILD_NUMBER"
-    "--form" "run_env[job_id]=$BUILDKITE_JOB_ID"
-    "--form" "run_env[message]=$MESSAGE"
+    "--form" "run_env[key]=\"$BUILDKITE_BUILD_ID\""
+    "--form" "run_env[url]=\"$BUILDKITE_BUILD_URL\""
+    "--form" "run_env[branch]=\"$BUILDKITE_BRANCH\""
+    "--form" "run_env[commit_sha]=\"$BUILDKITE_COMMIT\""
+    "--form" "run_env[number]=\"$BUILDKITE_BUILD_NUMBER\""
+    "--form" "run_env[job_id]=\"$BUILDKITE_JOB_ID\""
+    "--form" "run_env[message]=\"$MESSAGE\""
     "--form" "run_env[collector]=test-collector-buildkite-plugin"
   )
 
   if [[ "$DEBUG" == "true" ]]; then
-    curl_args+=("--form" "run_env[debug]=$DEBUG")
+    curl_args+=("--form" "run_env[debug]=\"$DEBUG\"")
   fi
 
   if [[ -n "$PLUGIN_VERSION" ]]; then
-    curl_args+=("--form" "run_env[version]=$PLUGIN_VERSION")
+    curl_args+=("--form" "run_env[version]=\"$PLUGIN_VERSION\"")
   fi
 
   if [[ "$ANNOTATE" != "false" ]]; then
-    curl_args+=("-o" "${CURL_RESP_FILE}")
+    curl_args+=("-o" "${response_file}")
   fi
 
   curl_args+=("${BUILDKITE_PLUGIN_TEST_COLLECTOR_API_URL:-https://analytics-api.buildkite.com/v1/uploads}")
@@ -136,9 +151,7 @@ upload() {
     echo curl "${curl_args[@]}"
   fi
 
-  curl_args+=("-H" "Authorization: Token token=\"$TOKEN_VALUE\"")
-
-  curl "${curl_args[@]}"
+  curl "${curl_args[@]}" -H @<(printf 'Authorization: Token token=\"%s\"\n' "${TOKEN_VALUE}")
 }
 
 # Runs the whole plugin logic for a particular find pattern
@@ -153,7 +166,7 @@ find_and_upload() {
   matching_files=()
   while IFS=$'' read -r matching_file ; do
     matching_files+=("$matching_file")
-  done < <("${FIND_CMD[@]}" "${BASE_PATH}" -path "${BASE_PATH}/${FILES_PATTERN}")
+  done < <("${FIND_CMD[@]}" "${BASE_PATH}" -path "${BASE_PATH}/${FILES_PATTERN}" | sort)
 
   if [[ "${#matching_files[@]}" -eq "0" ]]; then
     echo "No files found matching '${FILES_PATTERN}'"
@@ -161,16 +174,61 @@ find_and_upload() {
       exit "${BUILDKITE_PLUGIN_TEST_COLLECTOR_MISSING_ERROR:-1}"
     fi
   else
+    declare -a uploads_in_progress=()
+    echo "Uploading '${#matching_files[@]}' files matching '${FILES_PATTERN}'"
+
     # needs to be part of else for bash4.3 compatibility
     for file in "${matching_files[@]}"; do
-      echo "Uploading '$file'..."
-      if ! upload "$TOKEN_VALUE" "$FORMAT" "${file}"; then
-        echo "Error uploading, will continue"
-      fi
-      if [[ "$ANNOTATE" != "false" ]]; then
-        save-report-url "${CURL_RESP_FILE}"
-      fi
+      iterations_waited=0
+      while [[ "${#uploads_in_progress[@]}" -ge $UPLOAD_CONCURRENCY ]]; do
+        iterations_waited=$((iterations_waited + 1))
+        if [[ "${DEBUG}" == "true" ]]; then
+          echo "Waiting for uploads to finish..."
+        fi
+
+        sleep 1
+
+        for index in "${!uploads_in_progress[@]}"; do
+          # Note: kill -0 does not kill the pid, it provides a *nix compatible way to test the pid is responding.
+          if ! kill -0 "${uploads_in_progress[index]}" > /dev/null; then
+            unset 'uploads_in_progress[index]'
+          elif [[ "$iterations_waited" -gt $TIMEOUT ]]; then
+            echo "Upload '${uploads_in_progress[index]}' has been running for more than '${TIMEOUT}' seconds, killing it"
+            kill "${uploads_in_progress[index]}"
+            unset 'uploads_in_progress[index]'
+          fi
+        done
+      done
+
+      # Spawn a subcommand group to allow parallel uploads
+      {
+        echo "Uploading '$file'..."
+
+        if [[ -n "${CURL_RESP_FILE}" ]]; then
+          response_file="${CURL_RESP_FILE}"
+        else
+          response_file="$(mktemp -t 'response.XXXXXX')"
+        fi
+
+        if ! upload "$TOKEN_VALUE" "$FORMAT" "${file}" "${response_file}"; then
+          echo "Error uploading, will continue"
+        fi
+
+        if [[ "$ANNOTATE" != "false" ]]; then
+          save-report-url "${response_file}"
+        fi
+
+        if [[ "${DEBUG}" == "true" ]]; then
+          echo "Finished uploading '$file'"
+        fi
+      } &
+
+      # Store the PID of the upload
+      uploads_in_progress+=($!)
     done
+
+    # Wait for all uploads to finish
+    wait "${uploads_in_progress[@]}"
   fi
 }
 
